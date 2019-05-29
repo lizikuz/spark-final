@@ -1,11 +1,11 @@
 package sparkfinal
 
-import org.apache.spark.SparkConf
-import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.sql._
 import org.apache.spark.sql.types._
-import scala.collection.mutable.ListBuffer
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+import org.apache.spark.rdd.RDD
 import java.sql.Timestamp
 import  org.apache.spark.sql.expressions.Window
 
@@ -13,8 +13,7 @@ import java.util.Date
 
 object Main {
   
-  import org.apache.spark.sql.SparkSession
-  import org.apache.spark.sql.functions._
+
   
   val spark: SparkSession =
     SparkSession
@@ -26,11 +25,49 @@ object Main {
   
   def main(args: Array[String]): Unit = {
 
-    val warehouse   = spark.sparkContext.textFile("src/main/resources/sparkfinal/warehouse.csv")
     
+    //load warehouse data
+    val warehouse   = spark.sparkContext.textFile("src/main/resources/sparkfinal/warehouse.csv")
+    //create warehouse dataframe with schema
+    val warehouseDataFrame = warehouseDataframeWithSchema(warehouse)
+    
+    //load amount data
+    val amount   = spark.sparkContext.textFile("src/main/resources/sparkfinal/amount.csv")
+    //create amount dataframe with schema
+    val amountDataFrame = amountDataFrameWithSchema(amount)
+    
+    
+     
+    //create df with max-min-avg amounts
+    val minMaxAvgPositions = amountDataFrame.groupBy("positionId").agg(max("amount").as("max"), min("amount").as("min"), avg("amount").as("avg"))
+    //join with warehouses
+    val joinMaxMin = minMaxAvgPositions.join(warehouseDataFrame, minMaxAvgPositions("positionId") === warehouseDataFrame("positionId"))
+                  .select("warehouse", "product", "max", "min", "avg")
+                  
+    //show results
+    joinMaxMin.show()
+    
+    
+    
+    // create df with current amounts
+    val w = Window.partitionBy("positionId")
+    val currentPosition = amountDataFrame.withColumn("maxEventTime", max("eventTime").over(w))
+                  .filter("eventTime = maxEventTime")
+                  .drop("eventTime")
+                  .withColumnRenamed("maxEventTime", "eventTime")
+                  .withColumnRenamed("positionId", "posId")
+    //join with warehouse
+    val joinCurrent = currentPosition.join(warehouseDataFrame, currentPosition("posId") === warehouseDataFrame("positionId"))
+                  .select("positionId", "warehouse", "product", "amount")
+  
+    //show results       
+    joinCurrent.show()
+  
+  }
+  
+  def warehouseDataframeWithSchema(warehouse: RDD[String]): DataFrame = {
     val whHeaderColumns = warehouse.first().split(",").to[List]
     val whSchema = warehouseSchema(whHeaderColumns)
-
     val whData =
       warehouse
         .mapPartitionsWithIndex((i, it) => if (i == 0) it.drop(1) else it) // skip the header line
@@ -39,17 +76,12 @@ object Main {
                         line(1).toString,
                         line(2).toString,
                         new Timestamp(line(3).toLong * 1000)))
-
-    val warehouseDataFrame = spark.createDataFrame(whData, whSchema)
-    
-    
-    
-    val amount   = spark.sparkContext.textFile("src/main/resources/sparkfinal/amount.csv")
-    
+      spark.createDataFrame(whData, whSchema)
+  }
+  
+  def amountDataFrameWithSchema(amount: RDD[String]): DataFrame = {
     val amHeaderColumns = amount.first().split(",").to[List]
     val amSchema = amountSchema(amHeaderColumns)
-
-    
     val amData =
       amount
         .mapPartitionsWithIndex((i, it) => if (i == 0) it.drop(1) else it) // skip the header line
@@ -57,45 +89,8 @@ object Main {
         .map(line => Row(line(0).toLong,
                         line(1).toDouble,
                         new Timestamp(line(2).toLong * 1000)))
-                        
-    /*val amountDataFrame = spark.sqlContext.read.format("com.databricks.spark.csv")
-    .option("header", "true")
-    .option("delimiter", ",")
-    .option("timestampFormat", "yyyy-MM-dd HH:mm:ss")
-    .option("inferSchema", "true")
-    .option("nullValue", "null")
-    .load("src/main/resources/sparkfinal/amount.csv")
-    
-    amountDataFrame.show()*/
-
-    val amountDataFrame = spark.createDataFrame(amData, amSchema)
-     
-    val minMaxAvgPositions = amountDataFrame.groupBy("positionId").agg(max("amount").as("max"), min("amount").as("min"), avg("amount").as("avg"))
-    val joinMaxMin = minMaxAvgPositions.join(warehouseDataFrame, minMaxAvgPositions("positionId") === warehouseDataFrame("positionId"))
-                .select("warehouse", "product", "max", "min", "avg")
-    
-    
-    val w = Window.partitionBy("positionId")
-    val currentPosition = amountDataFrame.withColumn("maxEventTime", max("eventTime").over(w))
-    .filter("eventTime = maxEventTime")
-    .drop("eventTime")
-    .withColumnRenamed("maxEventTime", "eventTime")
-    .withColumnRenamed("positionId", "posId")
-    val joinCurrent = currentPosition.join(warehouseDataFrame, currentPosition("posId") === warehouseDataFrame("positionId"))
-                  .select("positionId", "warehouse", "product", "amount")
-    
-    
-    warehouseDataFrame.show()
-
-    amountDataFrame.show()
-    
-    joinMaxMin.show()
-    
-    joinCurrent.show()
-  
+    spark.createDataFrame(amData, amSchema)
   }
-  
-  
   
   def warehouseSchema(columnNames: List[String]): StructType = {
 
@@ -129,3 +124,14 @@ case class WarehouseRow(
   product: String,
   eventTime: Timestamp
 )
+
+
+    /*val amountDataFrame = spark.sqlContext.read.format("com.databricks.spark.csv")
+    .option("header", "true")
+    .option("delimiter", ",")
+    .option("timestampFormat", "yyyy-MM-dd HH:mm:ss")
+    .option("inferSchema", "true")
+    .option("nullValue", "null")
+    .load("src/main/resources/sparkfinal/amount.csv")
+    
+    amountDataFrame.show()*/
